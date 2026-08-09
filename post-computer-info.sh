@@ -13,8 +13,9 @@ HEADER_ADMIN_KEY_NAME="x-admin-key"
 DMI_ID_DIR="/sys/devices/virtual/dmi/id"
 DMI_FIELDS=(product_version product_name board_name)
 
-# Common marketing disk capacities in decimal GB.
-MARKETING_STORAGE_GB="8 16 20 32 64 120 128 240 250 256 480 500 512 1000 1024 2000 2048 4000 4096 8000 8192"
+# Common marketing disk capacities. Above 512 GB we report in TB.
+MARKETING_STORAGE_GB="8 16 20 32 64 120 128 240 250 256 480 500 512"
+MARKETING_STORAGE_TB="1 2 4 8"
 
 die() {
     echo "Error: $*" >&2
@@ -142,37 +143,77 @@ get_root_disk() {
 # Map raw disk bytes to a common marketing size (128/256/512 GB, 1 TB, ...).
 marketing_storage() {
     local bytes="$1"
-    awk -v bytes="$bytes" -v sizes_str="$MARKETING_STORAGE_GB" 'BEGIN {
-        n = split(sizes_str, sizes, " ")
-        gb = bytes / 1000 / 1000 / 1000
-        best = sizes[1] + 0
-        best_d = 1e99
-        for (i = 1; i <= n; i++) {
-            s = sizes[i] + 0
-            d = gb - s
-            if (d < 0) {
-                d = -d
+    awk -v bytes="$bytes" \
+        -v gb_sizes_str="$MARKETING_STORAGE_GB" \
+        -v tb_sizes_str="$MARKETING_STORAGE_TB" '
+        function nearest(val, sizes_str,    n, sizes, i, s, d, best, best_d) {
+            n = split(sizes_str, sizes, " ")
+            best = sizes[1] + 0
+            best_d = 1e99
+            for (i = 1; i <= n; i++) {
+                s = sizes[i] + 0
+                d = val - s
+                if (d < 0) {
+                    d = -d
+                }
+                if (d < best_d) {
+                    best_d = d
+                    best = s
+                }
             }
-            if (d < best_d) {
-                best_d = d
-                best = s
+            return best
+        }
+        BEGIN {
+            gb = bytes / 1000 / 1000 / 1000
+            # Midpoint between 512 GB and 1 TB retail sizes.
+            if (gb < 750) {
+                printf "%d GB\n", nearest(gb, gb_sizes_str)
+            } else {
+                tb = bytes / 1000 / 1000 / 1000 / 1000
+                printf "%d TB\n", nearest(tb, tb_sizes_str)
             }
         }
-        if (best >= 1000) {
-            printf "%d TB\n", int(best / 1000 + 0.5)
-        } else {
-            printf "%d GB\n", best
-        }
-    }'
+    '
 }
 
+get_disk_bytes() {
+    local disk="$1"
+    local bytes
+    bytes="$(lsblk -dn -bno SIZE "/dev/${disk}" | awk '{ print $1; exit }')"
+    require "$bytes" "could not determine storage size for /dev/${disk}"
+    printf '%s\n' "$bytes"
+}
+
+list_disks() {
+    lsblk -dn -o NAME,TYPE | awk '$2 == "disk" { print $1 }'
+}
+
+# Root disk first, then any other disks, comma-separated marketing sizes.
 get_storage() {
-    local root_disk bytes storage
+    local root_disk disk bytes size parts=()
     root_disk="$(get_root_disk)"
-    bytes="$(lsblk -dn -bno SIZE "/dev/${root_disk}" | awk '{ print $1; exit }')"
-    require "$bytes" "could not determine storage size for /dev/${root_disk}"
-    storage="$(marketing_storage "$bytes")"
-    require "$storage" "could not determine storage size for /dev/${root_disk}"
+
+    bytes="$(get_disk_bytes "$root_disk")"
+    parts+=("$(marketing_storage "$bytes")")
+
+    while read -r disk; do
+        [[ -n "$disk" && "$disk" != "$root_disk" ]] || continue
+        bytes="$(get_disk_bytes "$disk")"
+        size="$(marketing_storage "$bytes")"
+        require "$size" "could not determine storage size for /dev/${disk}"
+        parts+=("$size")
+    done < <(list_disks)
+
+    (( ${#parts[@]} > 0 )) || die "could not determine storage sizes"
+
+    local storage=""
+    local i
+    for i in "${!parts[@]}"; do
+        if (( i > 0 )); then
+            storage+=", "
+        fi
+        storage+="${parts[$i]}"
+    done
     printf '%s\n' "$storage"
 }
 
