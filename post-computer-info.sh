@@ -4,6 +4,18 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SECRETS_FILE="${SECRETS_FILE:-$SCRIPT_DIR/secrets.env}"
 
+# Used only to discover the primary IPv4 address.
+PROBE_IP="1.1.1.1"
+
+HEADER_CONTENT_TYPE="Content-Type: application/json"
+HEADER_ADMIN_KEY_NAME="x-admin-key"
+
+DMI_ID_DIR="/sys/devices/virtual/dmi/id"
+DMI_FIELDS=(product_version product_name board_name)
+
+# Common marketing disk capacities in decimal GB.
+MARKETING_STORAGE_GB="8 16 32 64 120 128 240 250 256 480 500 512 1000 1024 2000 2048 4000 4096 8000 8192"
+
 die() {
     echo "Error: $*" >&2
     exit 1
@@ -24,7 +36,7 @@ is_usable_dmi() {
         "" | "none" | "default string" | "to be filled by o.e.m." | \
         "system product name" | "system version" | "not specified" | "not applicable")
             return 1
-        ;;
+            ;;
     esac
     return 0
 }
@@ -40,7 +52,7 @@ load_secrets() {
     set -a
     source "$SECRETS_FILE"
     set +a
-    
+
     require "${URL:-}" "URL must be set in $SECRETS_FILE"
     require "${X_ADMIN_KEY:-}" "X_ADMIN_KEY must be set in $SECRETS_FILE"
 }
@@ -51,8 +63,8 @@ get_hostname() {
 
 get_ip() {
     local ip
-    ip="$(ip -4 route get 1.1.1.1 2>/dev/null \
-    | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
+    ip="$(ip -4 route get "$PROBE_IP" 2>/dev/null \
+        | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
     require "$ip" "could not determine local IP"
     printf '%s\n' "$ip"
 }
@@ -71,12 +83,11 @@ get_kernel() {
     uname -r
 }
 
-# Prefer product_version
-# Fall back when version is an OEM placeholder (e.g. AZW/Beelink "Default string").
+# Prefer product_version; fall back when version is an OEM placeholder.
 get_model() {
     local model="" dmi_field dmi_value
-    for dmi_field in product_version product_name board_name; do
-        dmi_value="$(cat "/sys/devices/virtual/dmi/id/${dmi_field}" 2>/dev/null || true)"
+    for dmi_field in "${DMI_FIELDS[@]}"; do
+        dmi_value="$(cat "${DMI_ID_DIR}/${dmi_field}" 2>/dev/null || true)"
         if is_usable_dmi "$dmi_value"; then
             dmi_value="${dmi_value#"${dmi_value%%[![:space:]]*}"}"
             dmi_value="${dmi_value%"${dmi_value##*[![:space:]]}"}"
@@ -131,8 +142,8 @@ get_root_disk() {
 # Map raw disk bytes to a common marketing size (128/256/512 GB, 1 TB, ...).
 marketing_storage() {
     local bytes="$1"
-    awk -v bytes="$bytes" 'BEGIN {
-        n = split("8 16 32 64 120 128 240 250 256 480 500 512 1000 1024 2000 2048 4000 4096 8000 8192", sizes, " ")
+    awk -v bytes="$bytes" -v sizes_str="$MARKETING_STORAGE_GB" 'BEGIN {
+        n = split(sizes_str, sizes, " ")
         gb = bytes / 1000 / 1000 / 1000
         best = sizes[1] + 0
         best_d = 1e99
@@ -198,11 +209,15 @@ build_payload() {
         }')
 }
 
+admin_key_header() {
+    printf '%s: %s' "$HEADER_ADMIN_KEY_NAME" "$X_ADMIN_KEY"
+}
+
 build_curl_args() {
     curl_args=(
         -X POST
-        -H "Content-Type: application/json"
-        -H "x-admin-key: ${X_ADMIN_KEY}"
+        -H "$HEADER_CONTENT_TYPE"
+        -H "$(admin_key_header)"
         -d "$payload"
         "$URL"
     )
@@ -215,8 +230,8 @@ preview_request() {
     cat <<EOF
 curl \\
   -X POST \\
-  -H $(printf '%q' "Content-Type: application/json") \\
-  -H $(printf '%q' "x-admin-key: ${X_ADMIN_KEY}") \\
+  -H $(printf '%q' "$HEADER_CONTENT_TYPE") \\
+  -H $(printf '%q' "$(admin_key_header)") \\
   -d $(printf '%q' "$payload") \\
   $(printf '%q' "$URL")
 EOF
