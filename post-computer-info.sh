@@ -45,25 +45,36 @@ load_secrets() {
   require "${X_ADMIN_KEY:-}" "X_ADMIN_KEY must be set in $SECRETS_FILE"
 }
 
-collect_host_info() {
-  hostname="$(uname -n)"
+get_hostname() {
+  uname -n
+}
 
+get_ip() {
+  local ip
   ip="$(ip -4 route get 1.1.1.1 2>/dev/null \
     | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
   require "$ip" "could not determine local IP"
+  printf '%s\n' "$ip"
+}
 
+get_os() {
+  local os
   [[ -r /etc/os-release ]] || die "/etc/os-release not found"
   # shellcheck source=/dev/null
   . /etc/os-release
   os="${PRETTY_NAME:-}"
   require "$os" "could not determine OS from /etc/os-release"
+  printf '%s\n' "$os"
+}
 
-  kernel="$(uname -r)"
+get_kernel() {
+  uname -r
+}
 
-  # Prefer product_version (Lenovo puts "ThinkPad T480" there; product_name is often the MTM).
-  # Fall back when version is an OEM placeholder (e.g. AZW/Beelink "Default string").
-  model=""
-  local dmi_field dmi_value
+# Prefer product_version (Lenovo puts "ThinkPad T480" there; product_name is often the MTM).
+# Fall back when version is an OEM placeholder (e.g. AZW/Beelink "Default string").
+get_model() {
+  local model="" dmi_field dmi_value
   for dmi_field in product_version product_name board_name; do
     dmi_value="$(cat "/sys/devices/virtual/dmi/id/${dmi_field}" 2>/dev/null || true)"
     if is_usable_dmi "$dmi_value"; then
@@ -74,15 +85,37 @@ collect_host_info() {
     fi
   done
   require "$model" "could not determine hardware model"
+  printf '%s\n' "$model"
+}
 
-  # MemTotal is a bit under installed RAM (firmware/hardware reserved); round up to whole GiB.
-  ram="$(awk '/MemTotal:/ { printf "%d GB\n", int($2 / 1024 / 1024 + 0.999); exit }' /proc/meminfo)"
+# MemTotal is a bit under installed RAM (firmware reserved).
+# Use GB when >= 1 GiB; otherwise MB rounded up to a 64 MiB step (e.g. ~480 -> 512 MB).
+get_ram() {
+  local ram
+  ram="$(awk '/MemTotal:/ {
+    mib = $2 / 1024
+    if (mib >= 1024) {
+      printf "%d GB\n", int(mib / 1024 + 0.999)
+    } else {
+      mb = int((mib + 63) / 64) * 64
+      if (mb < 1) mb = 1
+      printf "%d MB\n", mb
+    }
+    exit
+  }' /proc/meminfo)"
   require "$ram" "could not determine total RAM"
+  printf '%s\n' "$ram"
+}
 
+get_cpu() {
+  local cpu
   cpu="$(awk -F: '/^model name/ { gsub(/^ +/, "", $2); print $2; exit }' /proc/cpuinfo)"
   require "$cpu" "could not determine CPU"
+  printf '%s\n' "$cpu"
+}
 
-  local root_source root_disk
+get_storage() {
+  local root_source root_disk storage
   root_source="$(findmnt -n -o SOURCE /)"
   root_disk="$(lsblk -no PKNAME "$root_source" 2>/dev/null | head -1)"
   if [[ -z "$root_disk" ]]; then
@@ -95,6 +128,18 @@ collect_host_info() {
   storage="$(lsblk -dn -o SIZE "/dev/${root_disk}" \
     | awk '{ gsub(/^ +| +$/, "", $0); sub(/G$/, " GB"); print; exit }')"
   require "$storage" "could not determine storage size for /dev/${root_disk}"
+  printf '%s\n' "$storage"
+}
+
+collect_host_info() {
+  hostname="$(get_hostname)"
+  ip="$(get_ip)"
+  os="$(get_os)"
+  kernel="$(get_kernel)"
+  model="$(get_model)"
+  ram="$(get_ram)"
+  cpu="$(get_cpu)"
+  storage="$(get_storage)"
 }
 
 build_payload() {
