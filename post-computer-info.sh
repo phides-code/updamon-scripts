@@ -71,7 +71,7 @@ get_kernel() {
     uname -r
 }
 
-# Prefer product_version (Lenovo puts "ThinkPad T480" there; product_name is often the MTM).
+# Prefer product_version
 # Fall back when version is an OEM placeholder (e.g. AZW/Beelink "Default string").
 get_model() {
     local model="" dmi_field dmi_value
@@ -122,16 +122,16 @@ get_root_disk() {
     if [[ -z "$root_disk" ]]; then
         # SOURCE may already be the whole disk
         root_disk="$(lsblk -no NAME,TYPE "$root_source" 2>/dev/null \
-    | awk '$2 == "disk" { print $1; exit }')"
-fi
-require "$root_disk" "could not determine disk for /"
-printf '%s\n' "$root_disk"
+            | awk '$2 == "disk" { print $1; exit }')"
+    fi
+    require "$root_disk" "could not determine disk for /"
+    printf '%s\n' "$root_disk"
 }
 
 # Map raw disk bytes to a common marketing size (128/256/512 GB, 1 TB, ...).
 marketing_storage() {
-local bytes="$1"
-awk -v bytes="$bytes" 'BEGIN {
+    local bytes="$1"
+    awk -v bytes="$bytes" 'BEGIN {
         n = split("8 16 32 64 120 128 240 250 256 480 500 512 1000 1024 2000 2048 4000 4096 8000 8192", sizes, " ")
         gb = bytes / 1000 / 1000 / 1000
         best = sizes[1] + 0
@@ -152,41 +152,41 @@ awk -v bytes="$bytes" 'BEGIN {
         } else {
             printf "%d GB\n", best
         }
-}'
+    }'
 }
 
 get_storage() {
-local root_disk bytes storage
-root_disk="$(get_root_disk)"
-bytes="$(lsblk -dn -bno SIZE "/dev/${root_disk}" | awk '{ print $1; exit }')"
-require "$bytes" "could not determine storage size for /dev/${root_disk}"
-storage="$(marketing_storage "$bytes")"
-require "$storage" "could not determine storage size for /dev/${root_disk}"
-printf '%s\n' "$storage"
+    local root_disk bytes storage
+    root_disk="$(get_root_disk)"
+    bytes="$(lsblk -dn -bno SIZE "/dev/${root_disk}" | awk '{ print $1; exit }')"
+    require "$bytes" "could not determine storage size for /dev/${root_disk}"
+    storage="$(marketing_storage "$bytes")"
+    require "$storage" "could not determine storage size for /dev/${root_disk}"
+    printf '%s\n' "$storage"
 }
 
 collect_host_info() {
-hostname="$(get_hostname)"
-ip="$(get_ip)"
-os="$(get_os)"
-kernel="$(get_kernel)"
-model="$(get_model)"
-ram="$(get_ram)"
-cpu="$(get_cpu)"
-storage="$(get_storage)"
+    hostname="$(get_hostname)"
+    ip="$(get_ip)"
+    os="$(get_os)"
+    kernel="$(get_kernel)"
+    model="$(get_model)"
+    ram="$(get_ram)"
+    cpu="$(get_cpu)"
+    storage="$(get_storage)"
 }
 
 build_payload() {
-payload=$(jq -nc \
-    --arg hostname "$hostname" \
-    --arg ip "$ip" \
-    --arg os "$os" \
-    --arg kernel "$kernel" \
-    --arg model "$model" \
-    --arg ram "$ram" \
-    --arg cpu "$cpu" \
-    --arg storage "$storage" \
-    '{
+    payload=$(jq -nc \
+        --arg hostname "$hostname" \
+        --arg ip "$ip" \
+        --arg os "$os" \
+        --arg kernel "$kernel" \
+        --arg model "$model" \
+        --arg ram "$ram" \
+        --arg cpu "$cpu" \
+        --arg storage "$storage" \
+        '{
             hostname: $hostname,
             ip: $ip,
             os: $os,
@@ -195,21 +195,21 @@ payload=$(jq -nc \
             ram: $ram,
             cpu: $cpu,
             storage: $storage
-}')
+        }')
 }
 
 build_curl_args() {
-curl_args=(
-    -X POST
-    -H "Content-Type: application/json"
-    -H "x-admin-key: ${X_ADMIN_KEY}"
-    -d "$payload"
-    "$URL"
-)
+    curl_args=(
+        -X POST
+        -H "Content-Type: application/json"
+        -H "x-admin-key: ${X_ADMIN_KEY}"
+        -d "$payload"
+        "$URL"
+    )
 }
 
 preview_request() {
-echo "JSON:"
+    echo "JSON:"
     jq . <<<"$payload"
     echo
     cat <<EOF
