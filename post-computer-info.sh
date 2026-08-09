@@ -15,6 +15,20 @@ require() {
   [[ -n "$value" ]] || die "$message"
 }
 
+# DMI fields are often left as OEM placeholders.
+is_usable_dmi() {
+  local v="${1:-}"
+  v="${v#"${v%%[![:space:]]*}"}"
+  v="${v%"${v##*[![:space:]]}"}"
+  case "${v,,}" in
+    "" | "none" | "default string" | "to be filled by o.e.m." | \
+    "system product name" | "system version" | "not specified" | "not applicable")
+      return 1
+      ;;
+  esac
+  return 0
+}
+
 usage() {
   echo "Usage: $0 [-test]" >&2
   exit 1
@@ -46,10 +60,19 @@ collect_host_info() {
 
   kernel="$(uname -r)"
 
-  model="$(cat /sys/devices/virtual/dmi/id/product_version 2>/dev/null || true)"
-  if [[ -z "$model" || "$model" == "None" ]]; then
-    model="$(cat /sys/devices/virtual/dmi/id/product_name 2>/dev/null || true)"
-  fi
+  # Prefer product_version (Lenovo puts "ThinkPad T480" there; product_name is often the MTM).
+  # Fall back when version is an OEM placeholder (e.g. AZW/Beelink "Default string").
+  model=""
+  local dmi_field dmi_value
+  for dmi_field in product_version product_name board_name; do
+    dmi_value="$(cat "/sys/devices/virtual/dmi/id/${dmi_field}" 2>/dev/null || true)"
+    if is_usable_dmi "$dmi_value"; then
+      dmi_value="${dmi_value#"${dmi_value%%[![:space:]]*}"}"
+      dmi_value="${dmi_value%"${dmi_value##*[![:space:]]}"}"
+      model="$dmi_value"
+      break
+    fi
+  done
   require "$model" "could not determine hardware model"
 
   # MemTotal is a bit under installed RAM (firmware/hardware reserved); round up to whole GiB.
