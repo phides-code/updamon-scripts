@@ -14,7 +14,7 @@ DMI_ID_DIR="/sys/devices/virtual/dmi/id"
 DMI_FIELDS=(product_version product_name board_name)
 
 # Common marketing disk capacities in decimal GB.
-MARKETING_STORAGE_GB="8 16 32 64 120 128 240 250 256 480 500 512 1000 1024 2000 2048 4000 4096 8000 8192"
+MARKETING_STORAGE_GB="8 16 20 32 64 120 128 240 250 256 480 500 512 1000 1024 2000 2048 4000 4096 8000 8192"
 
 die() {
     echo "Error: $*" >&2
