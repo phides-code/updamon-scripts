@@ -10,8 +10,7 @@ PROBE_IP="1.1.1.1"
 HEADER_CONTENT_TYPE="Content-Type: application/json"
 HEADER_ADMIN_KEY_NAME="x-admin-key"
 
-DMI_ID_DIR="/sys/devices/virtual/dmi/id"
-DMI_FIELDS=(product_name product_version board_name)
+DMI_ID_DIR="${DMI_ID_DIR:-/sys/devices/virtual/dmi/id}"
 
 # Common marketing disk capacities. Above 512 GB we report in TB.
 MARKETING_STORAGE_GB="0 8 16 20 32 64 120 128 240 250 256 480 500 512"
@@ -44,6 +43,67 @@ is_usable_dmi() {
         return 1
     fi
     return 0
+}
+
+# BIOS-style revisions in product_version (e.g. Acer "V1.07"), not product names.
+is_version_like_dmi() {
+    local v="${1:-}"
+    v="${v#"${v%%[![:space:]]*}"}"
+    v="${v%"${v##*[![:space:]]}"}"
+    [[ "$v" =~ ^[Vv][0-9]+([.][0-9]+)*$ ]]
+}
+
+read_dmi_field() {
+    local field="$1"
+    local value=""
+    if [[ -r "${DMI_ID_DIR}/${field}" ]]; then
+        value="$(cat "${DMI_ID_DIR}/${field}" 2>/dev/null || true)"
+    fi
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    printf '%s\n' "$value"
+}
+
+# Lenovo: marketing name in product_version, MTM in product_name.
+# Acer: model in product_name, BIOS rev in product_version -> "Aspire E1-571 (V1.07)".
+get_model() {
+    local product_version product_name board_name
+    local name="" version="" model=""
+
+    product_version="$(read_dmi_field product_version)"
+    product_name="$(read_dmi_field product_name)"
+    board_name="$(read_dmi_field board_name)"
+
+    if is_usable_dmi "$product_version"; then
+        if is_version_like_dmi "$product_version"; then
+            version="$product_version"
+        else
+            name="$product_version"
+        fi
+    fi
+
+    if is_usable_dmi "$product_name"; then
+        if is_version_like_dmi "$product_name"; then
+            version="${version:-$product_name}"
+        elif [[ -z "$name" ]]; then
+            name="$product_name"
+        fi
+    fi
+
+    if [[ -z "$name" ]] && is_usable_dmi "$board_name" && ! is_version_like_dmi "$board_name"; then
+        name="$board_name"
+    fi
+
+    if [[ -n "$name" && -n "$version" ]]; then
+        model="${name} (${version})"
+    elif [[ -n "$name" ]]; then
+        model="$name"
+    elif [[ -n "$version" ]]; then
+        model="$version"
+    fi
+
+    require "$model" "could not determine hardware model"
+    printf '%s\n' "$model"
 }
 
 usage() {
@@ -86,22 +146,6 @@ get_os() {
 
 get_kernel() {
     uname -r
-}
-
-# Prefer product_name; fall back when name is an OEM placeholder.
-get_model() {
-    local model="" dmi_field dmi_value
-    for dmi_field in "${DMI_FIELDS[@]}"; do
-        dmi_value="$(cat "${DMI_ID_DIR}/${dmi_field}" 2>/dev/null || true)"
-        if is_usable_dmi "$dmi_value"; then
-            dmi_value="${dmi_value#"${dmi_value%%[![:space:]]*}"}"
-            dmi_value="${dmi_value%"${dmi_value##*[![:space:]]}"}"
-            model="$dmi_value"
-            break
-        fi
-    done
-    require "$model" "could not determine hardware model"
-    printf '%s\n' "$model"
 }
 
 # Snap MemTotal up to the next power-of-2 marketing size (e.g. ~15.4 GiB -> 16 GB).
@@ -333,4 +377,6 @@ main() {
     fi
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
