@@ -11,10 +11,10 @@ HEADER_CONTENT_TYPE="Content-Type: application/json"
 HEADER_ADMIN_KEY_NAME="x-admin-key"
 
 DMI_ID_DIR="/sys/devices/virtual/dmi/id"
-DMI_FIELDS=(product_version product_name board_name)
+DMI_FIELDS=(product_name product_version board_name)
 
 # Common marketing disk capacities. Above 512 GB we report in TB.
-MARKETING_STORAGE_GB="8 16 20 32 64 120 128 240 250 256 480 500 512"
+MARKETING_STORAGE_GB="0 8 16 20 32 64 120 128 240 250 256 480 500 512"
 MARKETING_STORAGE_TB="1 2 4 8"
 
 die() {
@@ -28,7 +28,7 @@ require() {
     [[ -n "$value" ]] || die "$message"
 }
 
-# DMI fields are often left as OEM placeholders.
+# DMI fields are often left as OEM placeholders or bare revision numbers.
 is_usable_dmi() {
     local v="${1:-}"
     v="${v#"${v%%[![:space:]]*}"}"
@@ -39,6 +39,10 @@ is_usable_dmi() {
             return 1
             ;;
     esac
+    # Reject bare revisions like "1.0" / "01" that are not model names.
+    if [[ "$v" =~ ^[0-9]+([.][0-9]+)*$ ]]; then
+        return 1
+    fi
     return 0
 }
 
@@ -84,7 +88,7 @@ get_kernel() {
     uname -r
 }
 
-# Prefer product_version; fall back when version is an OEM placeholder.
+# Prefer product_name; fall back when name is an OEM placeholder.
 get_model() {
     local model="" dmi_field dmi_value
     for dmi_field in "${DMI_FIELDS[@]}"; do
