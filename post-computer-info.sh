@@ -1,20 +1,28 @@
 #!/bin/bash
+# Gather static host inventory and POST it as JSON.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SECRETS_FILE="${SECRETS_FILE:-$SCRIPT_DIR/secrets.env}"
 
-# Used only to discover the primary IPv4 address.
-PROBE_IP="1.1.1.1"
-
 HEADER_CONTENT_TYPE="Content-Type: application/json"
 HEADER_ADMIN_KEY_NAME="x-admin-key"
+API_PATH="/computers"
+
+# Used only to discover the primary outbound IPv4 address.
+PROBE_IP="1.1.1.1"
 
 DMI_ID_DIR="${DMI_ID_DIR:-/sys/devices/virtual/dmi/id}"
 
-# Common marketing disk capacities. Above 512 GB we report in TB.
+# Common retail disk capacities. Above 512 GB we report in TB.
 MARKETING_STORAGE_GB="0 8 16 20 32 64 120 128 240 250 256 480 500 512"
 MARKETING_STORAGE_TB="1 2 4 8"
+# Midpoint between 512 GB and 1 TB when choosing unit.
+STORAGE_TB_THRESHOLD_GB=750
+
+# ---------------------------------------------------------------------------
+# Plumbing
+# ---------------------------------------------------------------------------
 
 die() {
     echo "Error: $*" >&2
@@ -27,29 +35,70 @@ require() {
     [[ -n "$value" ]] || die "$message"
 }
 
-# DMI fields are often left as OEM placeholders or bare revision numbers.
+trim() {
+    local value="${1:-}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    printf '%s\n' "$value"
+}
+
+join_by() {
+    local sep="$1"
+    shift
+    local first=1 part
+    for part in "$@"; do
+        if (( first )); then
+            first=0
+        else
+            printf '%s' "$sep"
+        fi
+        printf '%s' "$part"
+    done
+    printf '\n'
+}
+
+usage() {
+    echo "Usage: $0 [-test]" >&2
+    exit 1
+}
+
+load_secrets() {
+    [[ -r "$SECRETS_FILE" ]] || die "secrets file not readable: $SECRETS_FILE"
+    set -a
+    # shellcheck source=/dev/null
+    source "$SECRETS_FILE"
+    set +a
+
+    require "${URL:-}" "URL must be set in $SECRETS_FILE"
+    require "${X_ADMIN_KEY:-}" "X_ADMIN_KEY must be set in $SECRETS_FILE"
+    # Base URL from secrets may include a trailing slash; API_PATH is absolute.
+    ENDPOINT="${URL%/}${API_PATH}"
+}
+
+# ---------------------------------------------------------------------------
+# DMI / model
+# ---------------------------------------------------------------------------
+
+# Reject OEM placeholders and bare revisions like "1.0" / "01".
 is_usable_dmi() {
-    local v="${1:-}"
-    v="${v#"${v%%[![:space:]]*}"}"
-    v="${v%"${v##*[![:space:]]}"}"
+    local v
+    v="$(trim "${1:-}")"
     case "${v,,}" in
         "" | "none" | "default string" | "to be filled by o.e.m." | \
         "system product name" | "system version" | "not specified" | "not applicable")
             return 1
             ;;
     esac
-    # Reject bare revisions like "1.0" / "01" that are not model names.
     if [[ "$v" =~ ^[0-9]+([.][0-9]+)*$ ]]; then
         return 1
     fi
     return 0
 }
 
-# BIOS-style revisions in product_version (e.g. Acer "V1.07"), not product names.
+# BIOS-style revisions (e.g. Acer product_version "V1.07"), not product names.
 is_version_like_dmi() {
-    local v="${1:-}"
-    v="${v#"${v%%[![:space:]]*}"}"
-    v="${v%"${v##*[![:space:]]}"}"
+    local v
+    v="$(trim "${1:-}")"
     [[ "$v" =~ ^[Vv][0-9]+([.][0-9]+)*$ ]]
 }
 
@@ -59,13 +108,11 @@ read_dmi_field() {
     if [[ -r "${DMI_ID_DIR}/${field}" ]]; then
         value="$(cat "${DMI_ID_DIR}/${field}" 2>/dev/null || true)"
     fi
-    value="${value#"${value%%[![:space:]]*}"}"
-    value="${value%"${value##*[![:space:]]}"}"
-    printf '%s\n' "$value"
+    trim "$value"
 }
 
-# Lenovo: marketing name in product_version, MTM in product_name.
-# Acer: model in product_name, BIOS rev in product_version -> "Aspire E1-571 (V1.07)".
+# Prefer marketing names (Lenovo product_version) over MTM codes (product_name).
+# Append BIOS-style revisions: "Aspire E1-571 (V1.07)".
 get_model() {
     local product_version product_name board_name
     local name="" version="" model=""
@@ -98,7 +145,7 @@ get_model() {
         model="${name} (${version})"
     elif [[ -n "$name" ]]; then
         model="$name"
-    elif [[ -n "$version" ]]; then
+    else
         model="$version"
     fi
 
@@ -106,21 +153,9 @@ get_model() {
     printf '%s\n' "$model"
 }
 
-usage() {
-    echo "Usage: $0 [-test]" >&2
-    exit 1
-}
-
-load_secrets() {
-    [[ -r "$SECRETS_FILE" ]] || die "secrets file not readable: $SECRETS_FILE"
-    # shellcheck source=/dev/null
-    set -a
-    source "$SECRETS_FILE"
-    set +a
-
-    require "${URL:-}" "URL must be set in $SECRETS_FILE"
-    require "${X_ADMIN_KEY:-}" "X_ADMIN_KEY must be set in $SECRETS_FILE"
-}
+# ---------------------------------------------------------------------------
+# Collectors — each returns one inventory field on stdout
+# ---------------------------------------------------------------------------
 
 get_hostname() {
     uname -n
@@ -175,12 +210,16 @@ get_cpu() {
     printf '%s\n' "$cpu"
 }
 
+# ---------------------------------------------------------------------------
+# Storage
+# ---------------------------------------------------------------------------
+
 get_root_disk() {
     local root_source root_disk
     root_source="$(findmnt -n -o SOURCE /)"
     root_disk="$(lsblk -no PKNAME "$root_source" 2>/dev/null | head -1)"
     if [[ -z "$root_disk" ]]; then
-        # SOURCE may already be the whole disk
+        # SOURCE may already be the whole disk.
         root_disk="$(lsblk -no NAME,TYPE "$root_source" 2>/dev/null \
             | awk '$2 == "disk" { print $1; exit }')"
     fi
@@ -188,12 +227,25 @@ get_root_disk() {
     printf '%s\n' "$root_disk"
 }
 
+list_disks() {
+    lsblk -dn -o NAME,TYPE | awk '$2 == "disk" { print $1 }'
+}
+
+get_disk_bytes() {
+    local disk="$1"
+    local bytes
+    bytes="$(lsblk -dn -bno SIZE "/dev/${disk}" | awk '{ print $1; exit }')"
+    require "$bytes" "could not determine storage size for /dev/${disk}"
+    printf '%s\n' "$bytes"
+}
+
 # Map raw disk bytes to a common marketing size (128/256/512 GB, 1 TB, ...).
 marketing_storage() {
     local bytes="$1"
     awk -v bytes="$bytes" \
         -v gb_sizes_str="$MARKETING_STORAGE_GB" \
-        -v tb_sizes_str="$MARKETING_STORAGE_TB" '
+        -v tb_sizes_str="$MARKETING_STORAGE_TB" \
+        -v tb_threshold_gb="$STORAGE_TB_THRESHOLD_GB" '
         function nearest(val, sizes_str,    n, sizes, i, s, d, best, best_d) {
             n = split(sizes_str, sizes, " ")
             best = sizes[1] + 0
@@ -213,8 +265,7 @@ marketing_storage() {
         }
         BEGIN {
             gb = bytes / 1000 / 1000 / 1000
-            # Midpoint between 512 GB and 1 TB retail sizes.
-            if (gb < 750) {
+            if (gb < tb_threshold_gb) {
                 printf "%d GB\n", nearest(gb, gb_sizes_str)
             } else {
                 tb = bytes / 1000 / 1000 / 1000 / 1000
@@ -224,46 +275,35 @@ marketing_storage() {
     '
 }
 
-get_disk_bytes() {
+disk_marketing_size() {
     local disk="$1"
-    local bytes
-    bytes="$(lsblk -dn -bno SIZE "/dev/${disk}" | awk '{ print $1; exit }')"
-    require "$bytes" "could not determine storage size for /dev/${disk}"
-    printf '%s\n' "$bytes"
-}
-
-list_disks() {
-    lsblk -dn -o NAME,TYPE | awk '$2 == "disk" { print $1 }'
+    local bytes size
+    bytes="$(get_disk_bytes "$disk")"
+    size="$(marketing_storage "$bytes")"
+    require "$size" "could not determine storage size for /dev/${disk}"
+    printf '%s\n' "$size"
 }
 
 # Root disk first, then any other disks, comma-separated marketing sizes.
 get_storage() {
-    local root_disk disk bytes size parts=()
-    root_disk="$(get_root_disk)"
+    local root_disk disk size
+    local parts=()
 
-    bytes="$(get_disk_bytes "$root_disk")"
-    parts+=("$(marketing_storage "$bytes")")
+    root_disk="$(get_root_disk)"
+    parts+=("$(disk_marketing_size "$root_disk")")
 
     while read -r disk; do
         [[ -n "$disk" && "$disk" != "$root_disk" ]] || continue
-        bytes="$(get_disk_bytes "$disk")"
-        size="$(marketing_storage "$bytes")"
-        require "$size" "could not determine storage size for /dev/${disk}"
-        parts+=("$size")
+        parts+=("$(disk_marketing_size "$disk")")
     done < <(list_disks)
 
     (( ${#parts[@]} > 0 )) || die "could not determine storage sizes"
-
-    local storage=""
-    local i
-    for i in "${!parts[@]}"; do
-        if (( i > 0 )); then
-            storage+=", "
-        fi
-        storage+="${parts[$i]}"
-    done
-    printf '%s\n' "$storage"
+    join_by ", " "${parts[@]}"
 }
+
+# ---------------------------------------------------------------------------
+# Assemble + transport
+# ---------------------------------------------------------------------------
 
 collect_host_info() {
     hostname="$(get_hostname)"
@@ -308,8 +348,13 @@ build_curl_args() {
         -H "$HEADER_CONTENT_TYPE"
         -H "$(admin_key_header)"
         -d "$payload"
-        "$URL"
+        "$ENDPOINT"
     )
+}
+
+is_http_success() {
+    local http_code="$1"
+    [[ "$http_code" -ge 200 && "$http_code" -lt 300 ]]
 }
 
 preview_request() {
@@ -322,7 +367,7 @@ curl \\
   -H $(printf '%q' "$HEADER_CONTENT_TYPE") \\
   -H $(printf '%q' "$(admin_key_header)") \\
   -d $(printf '%q' "$payload") \\
-  $(printf '%q' "$URL")
+  $(printf '%q' "$ENDPOINT")
 EOF
 }
 
@@ -350,20 +395,24 @@ post_payload() {
     http_code=$(curl -sS -o "$response_file" -w "%{http_code}" "${curl_args[@]}") \
         || die "curl request failed"
 
-    if [[ "$http_code" -lt 200 || "$http_code" -ge 300 ]]; then
+    if ! is_http_success "$http_code"; then
         show_http_error "$http_code"
     fi
 
     show_success
 }
 
-main() {
-    local test_mode=0
+parse_args() {
+    test_mode=0
     if [[ "${1:-}" == "-test" ]]; then
         test_mode=1
     elif [[ $# -gt 0 ]]; then
         usage
     fi
+}
+
+main() {
+    parse_args "$@"
 
     load_secrets
     collect_host_info
