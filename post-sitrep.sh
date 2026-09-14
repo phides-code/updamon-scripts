@@ -154,9 +154,16 @@ get_wap() {
 # --- Tailscale (IPv4 address, or "off") ------------------------------------
 
 get_tailscale() {
-    local ip
+    local ip state
 
     have_cmd tailscale || { printf '%s\n' "$TAILSCALE_OFF"; return 0; }
+
+    state="$(tailscale status --json 2>/dev/null \
+        | jq -r '.BackendState // empty' 2>/dev/null || true)"
+    if [[ "$state" != "Running" ]]; then
+        printf '%s\n' "$TAILSCALE_OFF"
+        return 0
+    fi
 
     ip="$(tailscale ip -4 2>/dev/null | head -1 || true)"
     if [[ -n "$ip" ]]; then
