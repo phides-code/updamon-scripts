@@ -4,6 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SECRETS_FILE="${SECRETS_FILE:-$SCRIPT_DIR/secrets.env}"
+LOG_DIR="${LOG_DIR:-$SCRIPT_DIR/logs}"
 
 HEADER_CONTENT_TYPE="Content-Type: application/json"
 HEADER_ADMIN_KEY_NAME="x-admin-key"
@@ -339,27 +340,59 @@ show_success() {
     fi
 }
 
-show_http_error() {
+ensure_log_dir() {
+    mkdir -p "$LOG_DIR"
+}
+
+# One file per run, under logs/ (gitignored).
+new_post_log_path() {
+    printf '%s/sitrep-%s.log\n' "$LOG_DIR" "$(date +%Y-%m-%d_%H%M%S)"
+}
+
+write_post_log() {
     local http_code="$1"
-    echo "Error: request failed with HTTP ${http_code}" >&2
-    cat "$response_file" >&2 || true
-    echo >&2
-    exit 1
+    local status="$2"
+    local log_path="$3"
+
+    {
+        echo "time: $(date -Is)"
+        echo "endpoint: ${ENDPOINT}"
+        echo "http_code: ${http_code}"
+        echo "status: ${status}"
+        echo "response:"
+        if [[ -s "$response_file" ]]; then
+            jq . "$response_file" 2>/dev/null || cat "$response_file"
+        else
+            echo "(empty)"
+        fi
+    } >"$log_path"
 }
 
 post_payload() {
-    local http_code
+    local http_code log_path
     response_file=$(mktemp)
     trap 'rm -f "$response_file"' EXIT
 
+    ensure_log_dir
+    log_path="$(new_post_log_path)"
+
     http_code=$(curl -sS -o "$response_file" -w "%{http_code}" "${curl_args[@]}") \
-        || die "curl request failed"
+        || {
+            write_post_log "000" "curl_failed" "$log_path"
+            die "curl request failed (logged to ${log_path})"
+        }
 
     if ! is_http_success "$http_code"; then
-        show_http_error "$http_code"
+        write_post_log "$http_code" "error" "$log_path"
+        echo "Error: request failed with HTTP ${http_code} (logged to ${log_path})" >&2
+        cat "$response_file" >&2 || true
+        echo >&2
+        exit 1
     fi
 
+    write_post_log "$http_code" "success" "$log_path"
     show_success
+    echo "logged to ${log_path}"
 }
 
 parse_args() {
