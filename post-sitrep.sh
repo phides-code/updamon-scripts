@@ -66,7 +66,7 @@ get_hostname() {
 }
 
 get_apt_log() {
-    local path
+    local path name
 
     [[ -d "$AUTO_UPDATE_DIR" ]] || { printf '%s\n' "$NA"; return 0; }
 
@@ -80,6 +80,9 @@ get_apt_log() {
         return 0
     fi
 
+    # Filename encodes when the update ran, e.g. auto-update-2026-09-14-201439.
+    name="$(basename "$path")"
+    printf '%s\n' "$name"
     cat "$path"
 }
 
